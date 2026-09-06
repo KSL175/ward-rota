@@ -261,6 +261,14 @@ main {
 .dchip[aria-pressed="true"] { background: var(--tint); border-color: transparent; color: #fff; }
 .dchip[aria-pressed="true"] .dw { color: rgba(255,255,255,.8); }
 .dchip[aria-pressed="true"] .dot { background: rgba(255,255,255,.9); }
+.dchip.today { box-shadow: inset 0 0 0 2px var(--tint); }
+.dchip.today .dw { color: var(--tint); }
+.dchip.today[aria-pressed="true"] { box-shadow: none; }
+.dchip.today[aria-pressed="true"] .dw { color: rgba(255,255,255,.85); }
+.colhead.today { color: var(--tint); box-shadow: inset 0 2px 0 var(--tint); }
+.colhead.today .dd { color: var(--tint); }
+td.cell.today { background: var(--tint-soft); }
+td.cell.today.we { background: var(--tint-soft); }
 
 /* --------------------------------- chips --------------------------------- */
 .chip {
@@ -447,6 +455,11 @@ function rosterablePAs(p) { return p.paSplit ? p.paSplit.dcc : p.contractedPAs; 
 function parseDate(d) { var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d); return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])); }
 function toISO(d) { return d.toISOString().slice(0, 10); }
 function addDays(d, n) { var x = parseDate(d); x.setUTCDate(x.getUTCDate() + n); return toISO(x); }
+/** Today, as the calendar day the user is actually living in. */
+function todayISO() {
+  var t = new Date();
+  return toISO(new Date(Date.UTC(t.getFullYear(), t.getMonth(), t.getDate())));
+}
 function periodDays(p) { return Math.floor((parseDate(p.endDate) - parseDate(p.startDate)) / 86400000) + 1; }
 function periodWeeks(p) { return round(periodDays(p) / 7, 4); }
 function eachDate(p) { var o = [], i; for (i = 0; i < periodDays(p); i++) o.push(addDays(p.startDate, i)); return o; }
@@ -471,6 +484,19 @@ function dayRuleLabel(shift) {
 }
 /** A hot week / on-call week: one person holds it for the whole block. */
 function isBlockShift(shift) { return !!shift && shift.schedulingRule === "blockWeek"; }
+/** Grouped runs: 2 or 3 nights in a row rather than one night here and there. */
+function isRunShift(shift) { return !!shift && shift.schedulingRule === "runs"; }
+function runLabel(shift) {
+  var lo = shift.minRun || 1, hi = shift.maxRun || lo;
+  return lo === hi ? lo + " in a row" : lo + "-" + hi + " in a row";
+}
+/** Saturday and Sunday of the same weekend, so a pair is never split. */
+function weekendPartner(date) {
+  var dow = parseDate(date).getUTCDay();
+  if (dow === 6) return addDays(date, 1);   // Sat -> Sun
+  if (dow === 0) return addDays(date, -1);  // Sun -> Sat
+  return null;
+}
 
 /** The first day of the block that contains this date. */
 function blockStart(shift, date) {
@@ -642,6 +668,47 @@ function buildRota(st, opts) {
   function nightRunBefore(id, d) { var n = 0, x = addDays(d, -1); while (nightMap[id + "|" + x] && n < 40) { n++; x = addDays(x, -1); } return n; }
   function nightWithin(id, d, days) { for (var i = 1; i <= days; i++) if (nightMap[id + "|" + addDays(d, -i)]) return true; return false; }
 
+  function workedShiftOn(id, dd, shiftId) {
+    return work.some(function (e) { return e.staffId === id && e.date === dd && e.shiftTypeId === shiftId; });
+  }
+
+  /**
+   * The longest legal run of this shift for this person starting on `from`,
+   * capped at maxR days. It stops at the first day they cannot work.
+   * A run is never left ending on a Saturday when the Sunday is still open,
+   * so weekend pairs stay with one person.
+   */
+  function longestRun(p, s, from, maxR) {
+    var span = [], cost = 0, i, dd, c;
+    var before = runBefore(p.id, from);
+    var night = crossesMidnight(s);
+    var nightsBefore = night ? nightRunBefore(p.id, from) : 0;
+
+    for (i = 0; i < maxR; i++) {
+      dd = addDays(from, i);
+      if (dd > st.period.endDate) break;
+      if (!dayAllowed(s, dd)) break;
+      if (busy(p.id, dd)) break;
+      if (refuseIn(st, p, dd, s)) break;
+      if (before + span.length >= o.maxInARow) break;
+      if (night && nightsBefore + span.length >= o.nightsInARow) break;
+      if (!night && nightWithin(p.id, dd, o.restAfterNights)) break;
+      c = durHours(s) / hoursPerPA(s, st.config, dd);
+      if (!o.allowOverPAs && running[p.id] + cost + c > target[p.id] + st.config.tolerancePAs) break;
+      cost += c;
+      span.push(dd);
+    }
+
+    if (s.keepWeekendsTogether !== false && span.length > 1) {
+      var last = span[span.length - 1];
+      if (parseDate(last).getUTCDay() === 6) {              // ends on a Saturday
+        var sunday = addDays(last, 1);
+        if (sunday <= st.period.endDate && dayAllowed(s, sunday)) span.pop();
+      }
+    }
+    return span;
+  }
+
   /* Hardest shifts first, so the awkward nights get the pick of the staff. */
   var slots = st.shiftTypes.filter(function (s) { return s.active && s.requiredStaff > 0; }).slice();
   slots.sort(function (a, b) {
@@ -699,6 +766,50 @@ function buildRota(st, opts) {
             note(be);
           });
           held++;
+        }
+        return;
+      }
+
+      /* ---- grouped runs: nights in 2s or 3s, weekends never split ---- */
+      if (isRunShift(s)) {
+        var minR = Math.max(1, s.minRun || 1);
+        var maxR = Math.max(minR, s.maxRun || minR);
+        var haveR = work.filter(function (e) { return e.date === d && e.shiftTypeId === s.id; }).length;
+
+        while (haveR < s.requiredStaff) {
+          var options = [];
+          people.forEach(function (p) {
+            var span = longestRun(p, s, d, maxR);
+            if (span.length) options.push({ p: p, span: span });
+          });
+          // Prefer runs that reach the minimum, but never leave a hole in the
+          // rota just to protect the grouping rule.
+          var full = options.filter(function (x) { return x.span.length >= minR; });
+          var use = full.length ? full : options;
+          if (!use.length) { gaps.push({ date: d, code: s.code, name: s.name }); break; }
+
+          var onSunday = parseDate(d).getUTCDay() === 0;
+          use.sort(function (a, b) {
+            // On a Sunday, whoever did the Saturday keeps the weekend.
+            if (s.keepWeekendsTogether !== false && onSunday) {
+              var sa = workedShiftOn(a.p.id, addDays(d, -1), s.id) ? 0 : 1;
+              var sb = workedShiftOn(b.p.id, addDays(d, -1), s.id) ? 0 : 1;
+              if (sa !== sb) return sa - sb;
+            }
+            var da = target[a.p.id] - running[a.p.id], db = target[b.p.id] - running[b.p.id];
+            if (Math.abs(da - db) > 0.001) return db - da;
+            if (b.span.length !== a.span.length) return b.span.length - a.span.length;
+            if (weekends[a.p.id] !== weekends[b.p.id]) return weekends[a.p.id] - weekends[b.p.id];
+            return ((idx[a.p.id] + dayIndex) % people.length) - ((idx[b.p.id] + dayIndex) % people.length);
+          });
+
+          var chosen = use[0];
+          chosen.span.forEach(function (rd) {
+            var re = { id: "g" + (++seq) + "-" + Math.random().toString(36).slice(2, 6), date: rd, staffId: chosen.p.id, shiftTypeId: s.id };
+            work.push(re);
+            note(re);
+          });
+          haveR++;
         }
         return;
       }
@@ -789,7 +900,7 @@ function seedState() {
   var shiftTypes = [
     { id: "st-nwd", name: "Normal Working Day", code: "NWD", startTime: "09:00", endTime: "17:00", unpaidBreakMinutes: 0,  premiumTime: false, colour: "blue",   requiredStaff: 2, blockOnLeave: true,  hoursPerPAOverride: null, allowedDays: "weekdays", schedulingRule: "standard",  blockStartDay: 1, blockLength: 7, active: true },
     { id: "st-ld",  name: "Long Day",           code: "LD",  startTime: "08:00", endTime: "20:30", unpaidBreakMinutes: 30, premiumTime: false, colour: "amber",  requiredStaff: 1, blockOnLeave: true,  hoursPerPAOverride: null, allowedDays: "any",      schedulingRule: "standard",  blockStartDay: 1, blockLength: 7, active: true },
-    { id: "st-nt",  name: "Night Shift",        code: "N",   startTime: "20:00", endTime: "08:30", unpaidBreakMinutes: 30, premiumTime: true,  colour: "violet", requiredStaff: 1, blockOnLeave: true,  hoursPerPAOverride: null, allowedDays: "any",      schedulingRule: "standard",  blockStartDay: 1, blockLength: 7, active: true },
+    { id: "st-nt",  name: "Night Shift",        code: "N",   startTime: "20:00", endTime: "08:30", unpaidBreakMinutes: 30, premiumTime: true,  colour: "violet", requiredStaff: 1, blockOnLeave: true,  hoursPerPAOverride: null, allowedDays: "any",      schedulingRule: "runs",      blockStartDay: 1, blockLength: 7, minRun: 2, maxRun: 3, keepWeekendsTogether: true, active: true },
     { id: "st-opc", name: "Outpatient Clinic",  code: "OPC", startTime: "09:00", endTime: "13:00", unpaidBreakMinutes: 0,  premiumTime: false, colour: "green",  requiredStaff: 1, blockOnLeave: true,  hoursPerPAOverride: null, allowedDays: "weekdays", schedulingRule: "standard",  blockStartDay: 1, blockLength: 7, active: true },
     { id: "st-we",  name: "Weekend On Call",    code: "WE",  startTime: "08:00", endTime: "20:00", unpaidBreakMinutes: 0,  premiumTime: true,  colour: "rose",   requiredStaff: 1, blockOnLeave: true,  hoursPerPAOverride: null, allowedDays: "weekends", schedulingRule: "standard",  blockStartDay: 1, blockLength: 7, active: true },
     { id: "st-hot", name: "On-Call Week",       code: "HW",  startTime: "08:00", endTime: "20:00", unpaidBreakMinutes: 0,  premiumTime: false, colour: "rose",   requiredStaff: 0, blockOnLeave: true,  hoursPerPAOverride: null, allowedDays: "any",      schedulingRule: "blockWeek", blockStartDay: 1, blockLength: 7, active: true },
@@ -817,7 +928,10 @@ var ui = {
   editShiftId: null,
   gen: (function () { var g = {}, k; for (k in GEN_DEFAULTS) g[k] = GEN_DEFAULTS[k]; return g; })()
 };
-if (ui.date < state.period.startDate || ui.date > state.period.endDate) ui.date = state.period.startDate;
+(function openOnToday() {
+  var t = todayISO();
+  ui.date = t >= state.period.startDate && t <= state.period.endDate ? t : state.period.startDate;
+})();
 
 /** Fills in fields added by later versions, so an old saved rota still opens. */
 function normalise(s) {
@@ -826,6 +940,9 @@ function normalise(s) {
     if (!t.schedulingRule) t.schedulingRule = "standard";
     if (t.blockStartDay == null) t.blockStartDay = 1;
     if (!t.blockLength) t.blockLength = 7;
+    if (!t.minRun) t.minRun = 2;
+    if (!t.maxRun) t.maxRun = 3;
+    if (t.keepWeekendsTogether == null) t.keepWeekendsTogether = true;
   });
   return s;
 }
@@ -863,7 +980,17 @@ function commit() { save(); render(); }
  */
 function assignShift(staffId, date, shiftTypeId) {
   var s = shiftById(shiftTypeId), person = staffById(staffId);
-  var dates = isBlockShift(s) ? blockDates(s, date, state.period) : [date];
+  var dates;
+  if (isBlockShift(s)) {
+    dates = blockDates(s, date, state.period);
+  } else if (isRunShift(s) && s.keepWeekendsTogether !== false && weekendPartner(date)) {
+    // Saturday and Sunday of the same weekend go together.
+    var mate = weekendPartner(date);
+    dates = mate >= state.period.startDate && mate <= state.period.endDate ? [date, mate] : [date];
+    dates.sort();
+  } else {
+    dates = [date];
+  }
   var added = 0, skipped = 0;
   dates.forEach(function (d) {
     if (refusal(person, d, s)) { skipped++; return; }
@@ -873,7 +1000,7 @@ function assignShift(staffId, date, shiftTypeId) {
     added++;
   });
   commit();
-  if (isBlockShift(s)) {
+  if (dates.length > 1) {
     toast(added + " day" + (added === 1 ? "" : "s") + " booked" + (skipped ? ", " + skipped + " skipped" : ""));
   }
 }
@@ -965,6 +1092,20 @@ function toggleLeaveDay(staffId, date) {
   else addLeave(staffId, date, date, "annual", "approved");
 }
 function setConfig(key, value) { state.config[key] = value; commit(); }
+
+/** Moves the block so it contains today, then selects today. */
+function goToday() {
+  var t = todayISO();
+  if (t < state.period.startDate || t > state.period.endDate) {
+    var len = periodDays(state.period);
+    var monday = addDays(t, -((parseDate(t).getUTCDay() + 6) % 7));
+    state.period.startDate = monday;
+    state.period.endDate = addDays(monday, len - 1);
+  }
+  ui.date = t;
+  ui.mode = "day";
+  commit();
+}
 function movePeriod(n) {
   state.period.startDate = addDays(state.period.startDate, n);
   state.period.endDate = addDays(state.period.endDate, n);
@@ -1042,15 +1183,16 @@ function screenRota() {
 
   if (ui.mode === "day") {
     /* ---- date strip ---- */
+    var today = todayISO();
     h += '<div class="strip" id="strip">';
     dates.forEach(function (d) {
       var dt = parseDate(d), gaps = 0;
       state.shiftTypes.forEach(function (s) {
         if (s.active && s.requiredStaff > 0 && coverFor(d, s, state.entries).status === "gap") gaps++;
       });
-      h += '<button class="dchip' + (isWeekend(d) ? " we" : "") + '" aria-pressed="' + (d === ui.date) + '"'
+      h += '<button class="dchip' + (isWeekend(d) ? " we" : "") + (d === today ? " today" : "") + '" aria-pressed="' + (d === ui.date) + '"'
         + ' data-date="' + d + '" onclick="setDate(\'' + d + '\')">'
-        + '<div class="dw">' + DAYS[dt.getUTCDay()] + "</div>"
+        + '<div class="dw">' + (d === today ? "TODAY" : DAYS[dt.getUTCDay()]) + "</div>"
         + '<div class="dd num">' + dt.getUTCDate() + "</div>"
         + '<div class="dot" style="' + (gaps && d !== ui.date ? "background:var(--red)" : "") + '"></div>'
         + "</button>";
@@ -1058,7 +1200,8 @@ function screenRota() {
     h += "</div>";
 
     /* ---- who is on ---- */
-    h += '<div class="group"><h2>' + esc(LONG.format(parseDate(ui.date))) + "</h2>";
+    h += '<div class="group"><h2>' + (ui.date === today ? "Today &middot; " : "")
+      + esc(LONG.format(parseDate(ui.date))) + "</h2>";
     h += '<div class="card list">';
     state.staff.filter(function (p) { return p.active; }).forEach(function (p) {
       var rows = entriesFor(p.id, ui.date);
@@ -1110,9 +1253,11 @@ function screenRota() {
     /* ---- whole block grid ---- */
     h += '<div class="group"><div class="card gridwrap" id="gridwrap"><table class="rota"><thead><tr>'
       + '<th class="rh corner">Staff</th>';
+    var gridToday = todayISO();
     dates.forEach(function (d) {
       var dt = parseDate(d);
-      h += '<th class="' + (isWeekend(d) ? "we" : "") + '">' + DAYS[dt.getUTCDay()]
+      h += '<th class="colhead ' + (isWeekend(d) ? "we" : "") + (d === gridToday ? " today" : "") + '">'
+        + DAYS[dt.getUTCDay()]
         + '<span class="dd num">' + dt.getUTCDate() + "</span></th>";
     });
     h += "</tr></thead><tbody>";
@@ -1129,7 +1274,8 @@ function screenRota() {
       dates.forEach(function (d) {
         var lv = leaveFor(p.id, d);
         var blocked = lv && lv.status !== "declined" && state.config.blockShiftsOnLeave;
-        h += '<td class="cell' + (isWeekend(d) ? " we" : "") + (blocked ? " blocked" : "") + '"'
+        h += '<td class="cell' + (isWeekend(d) ? " we" : "") + (blocked ? " blocked" : "")
+          + (d === gridToday ? " today" : "") + '"'
           + ' onclick="' + (ui.moving ? "placeMoving('" + p.id + "','" + d + "')" : "cellMenu('" + p.id + "','" + d + "')") + '">'
           + '<div class="cellstack">';
         if (lv && lv.status !== "declined") {
@@ -1164,6 +1310,7 @@ function screenRota() {
     + esc(SHORT.format(parseDate(state.period.startDate))) + " &ndash; " + esc(SHORT.format(parseDate(state.period.endDate)))
     + '</div><div class="t2 num">' + periodDays(state.period) + " days</div></div>"
     + '<button class="gbtn icon" onclick="movePeriod(-' + periodDays(state.period) + ')">&lsaquo;</button>'
+    + '<button class="gbtn" onclick="goToday()">Today</button>'
     + '<button class="gbtn icon" onclick="movePeriod(' + periodDays(state.period) + ')">&rsaquo;</button></div>'
     + '<div class="row"><div class="grow"><div class="t1">Length</div></div>'
     + '<div class="seg" style="width:auto">'
@@ -1320,6 +1467,8 @@ function screenSettings() {
       + (s.allowedDays === "weekdays" ? '<span class="badge-mid">MON&ndash;FRI</span>' : "")
       + (s.allowedDays === "weekends" ? '<span class="badge-mid">SAT&ndash;SUN</span>' : "")
       + (isBlockShift(s) ? '<span class="badge-ot">' + (s.blockLength || 7) + "-DAY BLOCK</span>" : "")
+      + (isRunShift(s) ? '<span class="badge-ot">' + esc(runLabel(s).toUpperCase()) + "</span>" : "")
+      + (isRunShift(s) && s.keepWeekendsTogether !== false ? '<span class="badge-mid">WEEKENDS PAIRED</span>' : "")
       + "</div>"
       + '<div class="t2 num">' + esc(s.startTime) + "&ndash;" + esc(s.endTime)
       + (crossesMidnight(s) ? " +1d" : "") + " &middot; " + durHours(s).toFixed(2) + "h &middot; "
@@ -1533,7 +1682,9 @@ function sheetShift(shiftId) {
     allowedDays: "any", schedulingRule: "standard", blockStartDay: 1, blockLength: 7, active: true
   };
   var days = s.allowedDays || "any";
-  var isBlock = s.schedulingRule === "blockWeek";
+  var mode = s.schedulingRule || "standard";
+  var isBlock = mode === "blockWeek";
+  var isRuns = mode === "runs";
   var startDow = s.blockStartDay == null ? 1 : s.blockStartDay;
   var dowOptions = [1, 2, 3, 4, 5, 6, 0].map(function (n) {
     return '<option value="' + n + '"' + (n === startDow ? " selected" : "") + ">" + DOW_NAMES[n] + "</option>";
@@ -1558,16 +1709,32 @@ function sheetShift(shiftId) {
     + '<button type="button" data-v="weekends" aria-pressed="' + (days === "weekends") + '" onclick="pickSeg(\'sh-days\',this)">Sat&ndash;Sun</button>'
     + "</div>"
     + '<small>A weekend only shift can never land on a weekday, and the other way round.</small></div>'
+    + '<div class="field"><span>How it is scheduled</span>'
+    + '<div class="seg" id="sh-mode">'
+    + '<button type="button" data-v="standard" aria-pressed="' + (mode === "standard") + '" onclick="pickSeg(\'sh-mode\',this);syncModeOpts()">Day by day</button>'
+    + '<button type="button" data-v="runs" aria-pressed="' + isRuns + '" onclick="pickSeg(\'sh-mode\',this);syncModeOpts()">Grouped</button>'
+    + '<button type="button" data-v="blockWeek" aria-pressed="' + isBlock + '" onclick="pickSeg(\'sh-mode\',this);syncModeOpts()">Whole block</button>'
+    + "</div></div>"
+
+    + '<div id="sh-runopts"' + (isRuns ? "" : " hidden") + '>'
+    + '<div class="two"><label class="field"><span>Fewest in a row</span>'
+    + '<input class="in num" type="number" inputmode="numeric" min="1" max="14" id="sh-minrun" value="' + (s.minRun || 2) + '"></label>'
+    + '<label class="field"><span>Most in a row</span>'
+    + '<input class="in num" type="number" inputmode="numeric" min="1" max="14" id="sh-maxrun" value="' + (s.maxRun || 3) + '"></label></div>'
     + '<div class="card list" style="margin-bottom:12px">'
-    + '<div class="row"><div class="grow"><div class="t1">Block scheduling</div>'
-    + '<div class="t2">A hot week or on-call week. One person holds it for the whole block, not day by day.</div></div>'
-    + '<button class="sw" role="switch" id="sh-rule" aria-checked="' + isBlock + '" onclick="toggleBlockOpts(this)"><i></i></button></div>'
-    + '</div>'
+    + '<div class="row"><div class="grow"><div class="t1">Keep weekends together</div>'
+    + '<div class="t2">Saturday and Sunday always go to the same person.</div></div>'
+    + '<button class="sw" role="switch" id="sh-weekend" aria-checked="' + (s.keepWeekendsTogether !== false) + '" onclick="toggleSw(this)"><i></i></button></div>'
+    + "</div>"
+    + '<p class="sub">The builder tries for runs this long. It will use a shorter run rather than leave a day uncovered.</p>'
+    + "</div>"
+
     + '<div id="sh-blockopts"' + (isBlock ? "" : " hidden") + '>'
     + '<div class="two"><label class="field"><span>Block starts on</span>'
     + '<select class="in" id="sh-bstart">' + dowOptions + "</select></label>"
     + '<label class="field"><span>Block length (days)</span>'
     + '<input class="in num" type="number" inputmode="numeric" min="1" max="28" id="sh-blen" value="' + (s.blockLength || 7) + '"></label></div>'
+    + '<p class="sub">One person holds the whole block. Assigning any day books the lot.</p>'
     + "</div>"
     + '<div class="two"><label class="field"><span>Unpaid break (min)</span><input class="in num" type="number" inputmode="numeric" min="0" step="5" id="sh-break" value="' + s.unpaidBreakMinutes + '" oninput="shiftPreview()"></label>'
     + '<label class="field"><span>Colour</span><select class="in" id="sh-colour">' + colours + "</select></label></div>"
@@ -1600,9 +1767,10 @@ function segValue(id) {
   }
   return box.children[0].getAttribute("data-v");
 }
-function toggleBlockOpts(el) {
-  toggleSw(el);
-  document.getElementById("sh-blockopts").hidden = el.getAttribute("aria-checked") !== "true";
+function syncModeOpts() {
+  var m = segValue("sh-mode");
+  document.getElementById("sh-runopts").hidden = m !== "runs";
+  document.getElementById("sh-blockopts").hidden = m !== "blockWeek";
 }
 function toggleSw(el) { el.setAttribute("aria-checked", el.getAttribute("aria-checked") === "true" ? "false" : "true"); }
 function readShiftForm() {
@@ -1618,9 +1786,12 @@ function readShiftForm() {
     requiredStaff: Number(document.getElementById("sh-need").value) || 0,
     hoursPerPAOverride: document.getElementById("sh-palen").value === "" ? null : Number(document.getElementById("sh-palen").value),
     allowedDays: segValue("sh-days"),
-    schedulingRule: document.getElementById("sh-rule").getAttribute("aria-checked") === "true" ? "blockWeek" : "standard",
+    schedulingRule: segValue("sh-mode"),
     blockStartDay: Number(document.getElementById("sh-bstart").value),
-    blockLength: Number(document.getElementById("sh-blen").value) || 7
+    blockLength: Number(document.getElementById("sh-blen").value) || 7,
+    minRun: Math.max(1, Number(document.getElementById("sh-minrun").value) || 1),
+    maxRun: Math.max(1, Number(document.getElementById("sh-maxrun").value) || 1),
+    keepWeekendsTogether: document.getElementById("sh-weekend").getAttribute("aria-checked") === "true"
   };
 }
 function shiftPreview() {
@@ -1641,6 +1812,7 @@ function submitShift() {
   if (!d.name) { err.textContent = "Give the shift a name."; err.style.display = "block"; return; }
   if (!ok || mins <= 0) { err.textContent = "Check the start and end times."; err.style.display = "block"; return; }
   if (!d.code) d.code = d.name.slice(0, 3).toUpperCase();
+  if (d.minRun > d.maxRun) d.maxRun = d.minRun;
   if (ui.editShiftId) {
     var s = shiftById(ui.editShiftId);
     Object.keys(d).forEach(function (k) { s[k] = d[k]; });
