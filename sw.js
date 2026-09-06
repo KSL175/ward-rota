@@ -1,7 +1,7 @@
 /* Ward Rota service worker.
    Caches the whole app on first visit, then serves it from the cache, so the
    app opens with no signal at all. Bump CACHE when you upload a new version. */
-const CACHE = "ward-rota-v2";
+const CACHE = "ward-rota-v3";
 const ASSETS = [
   "./",
   "./index.html",
@@ -13,7 +13,10 @@ const ASSETS = [
 ];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  // cache: "reload" skips the browser's own HTTP cache, so a new version is
+  // picked up the moment it is uploaded instead of up to ten minutes later.
+  const fresh = ASSETS.map((url) => new Request(url, { cache: "reload" }));
+  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(fresh)).then(() => self.skipWaiting()));
 });
 
 self.addEventListener("activate", (event) => {
@@ -31,7 +34,14 @@ self.addEventListener("fetch", (event) => {
   // Opening the app: always give back the cached page if the network is away.
   if (req.mode === "navigate") {
     event.respondWith(
-      fetch(req).catch(() => caches.match("./index.html").then((r) => r || caches.match("./")))
+      fetch(req)
+        .then((res) => {
+          // Keep the offline copy up to date every time it loads online.
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put("./index.html", copy)).catch(() => {});
+          return res;
+        })
+        .catch(() => caches.match("./index.html").then((r) => r || caches.match("./")))
     );
     return;
   }
