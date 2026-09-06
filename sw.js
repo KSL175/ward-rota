@@ -1,7 +1,7 @@
 /* Ward Rota service worker.
    Caches the whole app on first visit, then serves it from the cache, so the
    app opens with no signal at all. Bump CACHE when you upload a new version. */
-const CACHE = "ward-rota-v1";
+const CACHE = "ward-rota-v2";
 const ASSETS = [
   "./",
   "./index.html",

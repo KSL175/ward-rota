@@ -693,6 +693,11 @@ function currentBlock() {
   return { id: "p1", name: "Block 1", startDate: start, endDate: addDays(start, 27) };
 }
 
+/**
+ * A fresh, empty unit. No people, no shifts, no leave.
+ * The shift types below are only a starting template - edit or delete any
+ * of them in Settings.
+ */
 function seedState() {
   var period = currentBlock();
   var shiftTypes = [
@@ -703,44 +708,10 @@ function seedState() {
     { id: "st-we",  name: "Weekend On Call",    code: "WE",  startTime: "08:00", endTime: "20:00", unpaidBreakMinutes: 0,  premiumTime: true,  colour: "rose",   requiredStaff: 0, blockOnLeave: true,  hoursPerPAOverride: null, active: true },
     { id: "st-wli", name: "Extra Session",      code: "WLI", startTime: "13:00", endTime: "17:00", unpaidBreakMinutes: 0,  premiumTime: false, colour: "slate",  requiredStaff: 0, blockOnLeave: false, hoursPerPAOverride: 3,    active: true }
   ];
-  var staff = [
-    { id: "s1", fullName: "Dr Amara Okafor",    grade: "Consultant", contractedPAs: 10, paSplit: { dcc: 7.5, spa: 2.5 }, excludedShiftTypeIds: ["st-nt"], active: true },
-    { id: "s2", fullName: "Dr Rhys Llewellyn",  grade: "Consultant", contractedPAs: 8,  paSplit: { dcc: 6,   spa: 2   }, excludedShiftTypeIds: ["st-nt"], active: true },
-    { id: "s3", fullName: "Dr Priya Raman",     grade: "SpR",        contractedPAs: 10, active: true },
-    { id: "s4", fullName: "Dr Tom Whitfield",   grade: "SpR",        contractedPAs: 6,  active: true },
-    { id: "s5", fullName: "Dr Sofia Marchetti", grade: "SHO",        contractedPAs: 10, active: true },
-    { id: "s6", fullName: "Dr Kwame Boateng",   grade: "SHO",        contractedPAs: 10, active: true },
-    { id: "s7", fullName: "Ellie Hargreaves",   grade: "ACP",        contractedPAs: 8,  active: true },
-    { id: "s8", fullName: "Dr Niamh Doherty",   grade: "SpR",        contractedPAs: 10, active: true },
-    { id: "s9", fullName: "Dr Ben Achterberg",  grade: "SHO",        contractedPAs: 10, active: true },
-    { id: "s10", fullName: "Dr Yusuf Kaya",     grade: "SHO",        contractedPAs: 8,  active: true }
-  ];
-  var entries = [], n = 0, day;
-  function push(date, staffId, shiftTypeId) { entries.push({ id: "e" + (++n), date: date, staffId: staffId, shiftTypeId: shiftTypeId }); }
-  for (day = 0; day < 21; day++) {
-    var date = addDays(period.startDate, day), wd = day % 7;
-    if (wd >= 5) {
-      push(date, ["s3", "s4", "s5"][day % 3], "st-we");
-      push(date, ["s6", "s5", "s3"][day % 3], "st-nt");
-      continue;
-    }
-    push(date, "s1", wd === 2 ? "st-opc" : "st-nwd");
-    if (wd !== 4) push(date, "s2", "st-nwd");
-    push(date, "s3", "st-ld");
-    if (wd < 3) push(date, "s4", "st-ld");
-    push(date, "s5", "st-nwd");
-    push(date, "s6", wd % 2 === 0 ? "st-nt" : "st-nwd");
-    if (wd !== 3) push(date, "s7", "st-nwd");
-  }
-  function req(rid, staffId, from, to, kind, status) {
-    return datesBetween(from, to).map(function (d, i) {
-      return { id: rid + "-" + i, requestId: rid, staffId: staffId, date: d, kind: kind, status: status };
-    });
-  }
-  var leave = []
-    .concat(req("lr1", "s2", addDays(period.startDate, 22), addDays(period.startDate, 26), "annual", "approved"))
-    .concat(req("lr2", "s5", addDays(period.startDate, 15), addDays(period.startDate, 15), "study", "approved"))
-    .concat(req("lr3", "s4", addDays(period.startDate, 9),  addDays(period.startDate, 11), "annual", "requested"));
+  // Nothing here on purpose. Add your own people on the Team tab.
+  var staff = [];
+  var entries = [];
+  var leave = [];
 
   return { config: defaultConfig(), staff: staff, shiftTypes: shiftTypes, entries: entries, leave: leave, period: period };
 }
@@ -748,7 +719,7 @@ function seedState() {
 /* ==================================================================
    3. STATE + persistence
    ================================================================== */
-var KEY = "ward-rota-v1";
+var KEY = "ward-rota-v2";
 var state = load() || seedState();
 var ui = {
   tab: "rota",
@@ -875,6 +846,24 @@ function statusColour(s) { return s === "ok" ? "var(--green)" : s === "under" ? 
 function cls(shift) { return COLOUR_CLASS[shift.colour] || "c6"; }
 function surname(name) { var p = name.split(" "); return p[p.length - 1]; }
 
+function startCard() {
+  return '<div class="card" style="padding:20px 18px;text-align:center">'
+    + '<div style="font-size:18px;font-weight:700;letter-spacing:-.02em">Set your unit up</div>'
+    + '<p style="font-size:13.5px;color:var(--label-2);margin:6px 0 14px">'
+    + "Three steps. It takes a few minutes.</p>"
+    + '<div class="card list" style="text-align:left;margin-bottom:14px">'
+    + '<div class="row"><span class="pill p-grey num">1</span><div class="grow">'
+    + '<div class="t1">Add your staff</div><div class="t2">Name, grade and contracted PAs.</div></div></div>'
+    + '<div class="row"><span class="pill p-grey num">2</span><div class="grow">'
+    + '<div class="t1">Check your shift types</div><div class="t2">Times, and how many people each shift needs.</div></div></div>'
+    + '<div class="row"><span class="pill p-grey num">3</span><div class="grow">'
+    + '<div class="t1">Build the rota</div><div class="t2">Then move anything you disagree with.</div></div></div>'
+    + "</div>"
+    + '<button class="gbtn wide solid" style="margin-bottom:8px" onclick="setTab(\'team\')">Add your first staff member</button>'
+    + '<button class="gbtn wide" onclick="setTab(\'settings\')">Check shift types</button>'
+    + "</div>";
+}
+
 function toast(msg) {
   var el = document.createElement("div");
   el.className = "movebar";
@@ -890,6 +879,10 @@ function toast(msg) {
 function screenRota() {
   var dates = eachDate(state.period);
   var h = "";
+
+  if (!state.staff.filter(function (p) { return p.active; }).length) {
+    return '<div class="group">' + startCard() + "</div>";
+  }
 
   h += '<div class="group"><button class="gbtn wide solid" onclick="sheetGenerate()">Build the rota for me</button></div>';
 
@@ -1041,6 +1034,8 @@ function screenRota() {
 
 function screenBalance() {
   var bals = allBalances(state);
+  if (!bals.length) return '<div class="group">' + startCard() + "</div>";
+
   var target = bals.reduce(function (a, b) { return a + b.targetHours; }, 0);
   var done = bals.reduce(function (a, b) { return a + b.assignedHours; }, 0);
   var under = bals.filter(function (b) { return b.status === "under"; }).length;
@@ -1122,6 +1117,9 @@ function screenTeam() {
   allBalances(state).forEach(function (b) { bal[b.staffId] = b; });
   var h = '<div class="group"><button class="gbtn wide solid" onclick="sheetAddStaff()">Add staff member</button></div>';
   h += '<div class="group"><h2>' + state.staff.length + ' people</h2><div class="card list">';
+  if (!state.staff.length) {
+    h += '<div class="empty">Nobody yet. Tap the blue button to add your first person.</div>';
+  }
   state.staff.forEach(function (p) {
     var b = bal[p.id], ros = rosterablePAs(p);
     h += '<button class="row" onclick="sheetStaff(\'' + p.id + '\')">'
@@ -1181,9 +1179,9 @@ function screenSettings() {
   h += '<div class="group"><h2>Data</h2><div class="card list">'
     + '<button class="row" onclick="sheetBackup()"><div class="grow"><div class="t1">Backup and restore</div>'
     + '<div class="t2">Copy your rota out, or paste one back in.</div></div><span class="chev">&rsaquo;</span></button>'
-    + '<div class="row"><div class="grow"><div class="t1">Start again</div>'
-    + '<div class="t2">Wipes your changes and reloads the example rota.</div></div>'
-    + '<button class="gbtn danger" onclick="resetAll()">Reset</button></div></div>'
+    + '<div class="row"><div class="grow"><div class="t1">Delete everything</div>'
+    + '<div class="t2">Removes all staff, shifts and leave. The shift type template comes back.</div></div>'
+    + '<button class="gbtn danger" onclick="confirmReset()">Delete</button></div></div>'
     + '<p class="note">Everything is saved on this device only. Nothing is sent anywhere. Do not put patient details in here.</p></div>';
   return h;
 }
@@ -1266,6 +1264,10 @@ function startMove(entryId, shiftTypeId) {
 function cancelMove() { ui.moving = null; render(); }
 
 function sheetBookLeave() {
+  if (!state.staff.length) {
+    return openSheet('<h3>No staff yet</h3><p class="sub">Add people on the Team tab first.</p>'
+      + '<button class="gbtn wide solid" onclick="closeSheet();setTab(\'team\')">Go to Team</button>');
+  }
   var opts = state.staff.map(function (p) { return '<option value="' + p.id + '">' + esc(p.fullName) + "</option>"; }).join("");
   var kinds = ["annual", "study", "sick", "other"].map(function (k) { return '<option value="' + k + '">' + k.charAt(0).toUpperCase() + k.slice(1) + "</option>"; }).join("");
   openSheet(
@@ -1474,6 +1476,10 @@ function bumpGen(key, delta, min, max) {
 
 function sheetGenerate() {
   var people = state.staff.filter(function (p) { return p.active; }).length;
+  if (!people) {
+    return openSheet('<h3>No staff yet</h3><p class="sub">The builder needs people and their PAs before it can do anything.</p>'
+      + '<button class="gbtn wide solid" onclick="closeSheet();setTab(\'team\')">Go to Team</button>');
+  }
   var need = 0;
   state.shiftTypes.forEach(function (s) { if (s.active) need += s.requiredStaff; });
   openSheet(
@@ -1601,6 +1607,12 @@ function resetPA() {
   state.config.fullTimePAs = 10;
   state.config.tolerancePAs = 0.5;
   commit();
+}
+function confirmReset() {
+  openSheet('<h3>Delete everything?</h3>'
+    + '<p class="sub">Every staff member, shift and leave request on this device goes. This cannot be undone.</p>'
+    + '<button class="gbtn wide" style="margin-bottom:9px" onclick="closeSheet();sheetBackup()">Back it up first</button>'
+    + '<button class="gbtn wide danger" onclick="closeSheet();resetAll()">Yes, delete everything</button>');
 }
 function resetAll() {
   state = seedState();
